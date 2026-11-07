@@ -1,0 +1,417 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --ink: #1f2328;
+  --muted: #6e7781;
+  --line: #d0d7de;
+  --hover: #f3f4f6;
+  --error: #cf222e;
+  --selected: #f25c05;
+  --cursor: #e5161b;
+  --lane-fill: #f6f8fa;
+  /* Behind sub-rulers whose m against the main ruler is a power of two (halves, quarters, …). */
+  --binary-ruler-fill: #f1f3f6;
+  /* A toggle button that is switched on, e.g. Segmentation. */
+  --toggle-on-fill: #e3e7ec;
+  --block-fill: rgba(46, 111, 209, 0.22);
+  --block-stroke: #2e6fd1;
+  --block-highlight-fill: rgba(242, 92, 5, 0.3);
+  --ruler-color-0: #2e6fd1;
+  --ruler-color-1: #d1495b;
+  --ruler-color-2: #2f9e5a;
+  --ruler-color-3: #d9861c;
+  --ruler-color-4: #8250df;
+  --ruler-color-5: #1b998b;
+  --border-line: #1a7f37;
+  --paste-free-fill: rgba(26, 127, 55, 0.25);
+  --paste-taken-fill: rgba(229, 22, 27, 0.3);
+  font-family: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --ink: #e6e8eb;
+    --muted: #8b949e;
+    --line: #3d444d;
+    --hover: #22262d;
+    --error: #ff7b72;
+    --selected: #ff9a3c;
+    --cursor: #ff4d4f;
+    --lane-fill: #1d2026;
+    --binary-ruler-fill: #1f232a;
+    --toggle-on-fill: #2c313a;
+    --block-fill: rgba(106, 163, 255, 0.28);
+    --block-stroke: #6aa3ff;
+    --block-highlight-fill: rgba(255, 154, 60, 0.35);
+    --border-line: #3fb950;
+    --paste-free-fill: rgba(63, 185, 80, 0.3);
+    --paste-taken-fill: rgba(255, 77, 79, 0.35);
+    --ruler-color-0: #6aa3ff;
+    --ruler-color-1: #ff7b8a;
+    --ruler-color-2: #5fd08c;
+    --ruler-color-3: #f2b25c;
+    --ruler-color-4: #b493ff;
+    --ruler-color-5: #4fd1c1;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.workspace {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+}
+
+.workspace.dragging {
+  cursor: grabbing;
+}
+
+.workspace.moving-branch {
+  cursor: ew-resize;
+}
+
+.ruler-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  color: var(--ink);
+}
+
+.connectors {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  pointer-events: none;
+}
+
+.connectors path {
+  fill: none;
+  stroke-width: 2;
+}
+
+.ratio-label,
+.lane-label,
+.lane-volume,
+.ruler-button {
+  position: absolute;
+  box-sizing: border-box;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px system-ui, sans-serif;
+}
+
+.ratio-label {
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border-left-width: 3px;
+}
+
+input.ratio-label {
+  cursor: text;
+  user-select: text;
+}
+
+input.ratio-label:focus {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+.lane-label {
+  padding: 0 8px;
+  font-size: 13px;
+  cursor: text;
+  user-select: text;
+}
+
+/* Right of its lane; the mouse wheel over it changes the lane's volume. */
+.lane-volume {
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  cursor: ns-resize;
+}
+
+.lane-label:focus {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+.ratio-label.invalid,
+.ratio-label.invalid:focus {
+  border-color: var(--error);
+  outline-color: var(--error);
+}
+
+.ruler-button {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ruler-button:hover {
+  background: var(--hover);
+}
+
+.ruler-button:focus-visible {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+/* Reserved space at the bottom; the bar has no frame of its own, only its content shows. */
+.toolbar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px 10px;
+}
+
+/* One tier of the toolbar: mode, then playback, then rectangle properties above lane properties, the project at the bottom. */
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 28px;
+}
+
+.toolbar-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.toolbar-input {
+  box-sizing: border-box;
+  width: 96px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px system-ui, sans-serif;
+}
+
+.toolbar-input:focus {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+.toolbar-input.invalid,
+.toolbar-input.invalid:focus {
+  border-color: var(--error);
+  outline-color: var(--error);
+}
+
+.toolbar-button {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.toolbar-button:hover {
+  background: var(--hover);
+}
+
+.toolbar-button:focus-visible {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+.hint {
+  margin: 0 0 0 auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar-input.project-name {
+  width: 160px;
+}
+
+.toolbar-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: var(--bg);
+}
+
+/* The selected lane, whose key the toolbar shows. */
+.lane-label.selected {
+  border-color: var(--selected);
+  box-shadow: inset 3px 0 0 var(--selected);
+  font-weight: 600;
+}
+
+.toolbar-select {
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px system-ui, sans-serif;
+}
+
+.toolbar-select:focus {
+  outline: 2px solid var(--ruler-color-0);
+  outline-offset: 1px;
+}
+
+.toolbar-select:disabled {
+  opacity: 0.5;
+}
+
+.toolbar-input.text {
+  width: 140px;
+}
+
+.toolbar-input:disabled {
+  opacity: 0.5;
+}
+
+.toolbar-input.chord {
+  width: 80px;
+}
+
+.toolbar-input.bpm {
+  width: 64px;
+}
+
+/* The pitch being typed in content mode, in place of the Pitch list. */
+.toolbar-input.pitch {
+  width: 72px;
+}
+
+/* A field the keys went to: the Mark field after g, the Pitch, Chord and Text fields after p, v and t in content mode. */
+.toolbar-input.active,
+.toolbar-select.active {
+  border-color: var(--selected);
+  outline-color: var(--selected);
+  background: var(--block-highlight-fill);
+}
+
+.toolbar-input.active.invalid {
+  border-color: var(--error);
+  outline-color: var(--error);
+}
+
+/* An "m" was typed; the next key names the mode. */
+.toolbar-select.mode.pending {
+  outline: 2px dashed var(--selected);
+  outline-offset: 1px;
+}
+
+.mode-pending {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The overview of keyboard shortcuts in help mode: half the window's area, centred. */
+.help-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 100;
+  box-sizing: border-box;
+  width: 71vw;
+  height: 71vh;
+  padding: 20px 28px;
+  overflow-y: auto;
+  transform: translate(-50%, -50%);
+  border-radius: 8px;
+  background: #ffbf00;
+  color: #000;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  font-size: 14px;
+  line-height: 1.5;
+  cursor: default;
+}
+
+.help-overlay h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.help-overlay h2 {
+  margin: 18px 0 4px;
+  font-size: 16px;
+}
+
+.help-overlay p {
+  margin: 0 0 8px;
+}
+
+.help-list {
+  margin: 0;
+}
+
+.help-row {
+  display: flex;
+  gap: 8px;
+}
+
+.help-row dt {
+  flex: none;
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.help-row dd {
+  margin: 0;
+}
+
+/* A toggle button that is switched on. */
+.toolbar-button.toggle.on,
+.toolbar-button.toggle.on:hover {
+  background: var(--toggle-on-fill);
+}
+
+/* Over a lane's segment part, where a click sets or removes a segment line. */
+.workspace.segmenting {
+  cursor: pointer;
+}
+
+/* Same width for "Play" and "Stop", so the controls after it don't jump. */
+.toolbar-button.play {
+  min-width: 64px;
+}
