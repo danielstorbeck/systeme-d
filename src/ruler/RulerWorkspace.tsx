@@ -1,7 +1,7 @@
 import { forwardRef, Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { chainGrid, chainOf, findChain, mergeChain, pruneChains, type PooledChain, type RulerChain } from './chains';
 import { drawBlock, drawLane, drawMainRuler, drawSubRuler } from './drawRuler';
-import { nextIds, type WorkspaceState } from '../project';
+import { emptyState, nextIds, type WorkspaceState } from '../project';
 import type { Key } from '../keys';
 import { DEFAULT_DRUM_PITCH, stepDrum } from '../drums';
 import { DEFAULT_PITCH, noteName } from '../pitch';
@@ -16,6 +16,9 @@ import {
   copyBlock,
   cursorSpan,
   isFree,
+  spanAfter,
+  neighbourMark,
+  blockBefore,
   resizeBlock,
   renameLane,
   setBlockPitch,
@@ -55,7 +58,7 @@ import { moveRuler, neighbourRuler, removeRulerTree, restoreRulerTree, rulerAfte
 import type { Command, Mode } from '../modes';
 import { moveBorder, placeBorders, resolveBorders, type Borders } from './borders';
 import { VolumeLabel } from './VolumeLabel';
-import { addSubRuler, INITIAL_RULERS, isBinaryRuler, MAIN_RULER_ID, orderRulers, removeRuler, selectRuler, setRatio, shiftRuler } from './rulers';
+import { addSubRuler, isBinaryRuler, MAIN_RULER_ID, orderRulers, removeRuler, selectRuler, setRatio, shiftRuler } from './rulers';
 import { useBlockDrawing } from './useBlockDrawing';
 import { useBranchDrag } from './useBranchDrag';
 import { usePanZoom } from './usePanZoom';
@@ -70,6 +73,8 @@ interface PlaybackRegion {
 export interface RulerWorkspaceHandle {
   /** Scrolls so that this main-ruler mark is at the left end of the visible rulers. */
   goToMark: (mark: number) => void;
+  /** Zooms and scrolls so that the main ruler's first `count` marks fill the visible rulers. */
+  showFirstMarks: (count: number) => void;
   /** Adds a lane below the existing ones. */
   addLane: () => void;
   /** The current work, including the view, for saving. */
@@ -85,9 +90,12 @@ export interface RulerWorkspaceHandle {
   leaveMode: (mode: Mode) => void;
   /**
    * Runs a command of lane or ruler mode on the selected lane or sub-ruler: moving the selection, moving it
-   * among its neighbours, removing it (which can be undone and redone), or deriving a new sub-ruler.
+   * among its neighbours, removing it (which can be undone and redone), or deriving a new sub-ruler; and the
+   * commands of the other modes. Returns the id of a block next mode has just put, whose pitch is to be set.
    */
-  runCommand: (mode: Mode, command: Command) => void;
+  runCommand: (mode: Mode, command: Command) => number | undefined;
+  /** Next mode: the new block's pitch is set (or left as it is), so the green line moves to its right end. */
+  finishNext: () => void;
   /** Assigns a key to the selected lane, if there is one. */
   setSelectedLaneKey: (key: Key) => void;
   /** Assigns a sound to the selected lane, if there is one. */
@@ -142,8 +150,27 @@ interface BlockDeletion {
   chain?: PooledChain;
 }
 
+/** Where next mode's green line is: at the right end of a block, or at x on a lane after an empty space. */
+type NextAnchor = { blockId: number } | { laneId: number; x: number };
+/**
+ * A space or rectangle put in next mode: where the green line was before and after, and what was highlighted
+ * before; for a rectangle its id, and once undone the rectangle as it was taken out.
+ */
+interface NextStep {
+  before: NextAnchor;
+  after: NextAnchor;
+  highlightedBefore: number | null;
+  blockId?: number;
+  deletion?: BlockDeletion;
+}
+
 /** After the wheel stops turning over a block, its note goes on sounding this long. */
 const WHEEL_SOUND_HOLD_MS = 400;
+/** Next mode's green line is drawn this thick, reaching this far above and below its lane. */
+const NEXT_LINE_WIDTH = 2;
+const NEXT_LINE_OVERHANG_PX = 3;
+/** Next mode reads lengths of at most this many digits. */
+const MAX_NEXT_DIGITS = 4;
 /** The playback cursor is drawn this thick. */
 const CURSOR_LINE_WIDTH = 2;
 /** Longer gaps between frames (e.g. while the tab was hidden) only advance the cursor this far. */
@@ -159,15 +186,6 @@ const SEGMENT_LABEL_FONT = '11px system-ui, sans-serif';
 const SEGMENT_LABEL_PADDING_PX = 3;
 /** The volume label spans the width of the delete and plus buttons above it. */
 const VOLUME_LABEL_WIDTH_PX = RIGHT_GUTTER_PX - 2 * PLUS_BUTTON_RIGHT_PX;
-/** A workspace with only the main ruler, used when there is no saved work. */
-const EMPTY_STATE: WorkspaceState = {
-  rulers: INITIAL_RULERS,
-  lanes: [],
-  lanesCreated: 0,
-  blocks: [],
-  chains: [],
-  view: INITIAL_VIEW,
-};
 
 /**
  * The main ruler and the sub-rulers derived from it, sharing one horizontal pan and zoom.
@@ -178,7 +196,8 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
   { initialState, onChange, onSelectedLaneChange, onHighlightedBlockChange, bpm = DEFAULT_BPM, onPlayingChange, loop = false, mode = 'depeche', segmentation = false },
   ref,
 ) {
-  const [initial] = useState(() => initialState ?? EMPTY_STATE);
+  // Without saved work, start with only the main ruler.
+  const [initial] = useState(() => initialState ?? emptyState());
   const initialIds = useMemo(() => nextIds(initial), [initial]);
   const [rulers, setRulers] = useState(initial.rulers);
   const nextIdRef = useRef(initialIds.node);
@@ -241,6 +260,33 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     const span = cursorSpan(chainGrid(chain), cursor.x, copied.intervals);
     return { laneRow, chain, span, free: isFree(blocks, cursor.laneId, span) };
   };
+  /**
+   * Next mode's green line: at the right end of a block, or at x after an empty space; the digits typed for the
+   * length of what comes next; and whether the block just put there is still having its pitch set (the line then
+   * waits, and the block is highlighted as usual). Null outside next mode, or without a block to start from.
+   */
+  const nextRef = useRef<{ anchor: NextAnchor; digits: string; editing: boolean } | null>(null);
+  /** Where the green line is; undefined while hidden, e.g. after its block has gone. */
+  const nextLine = () => {
+    const next = nextRef.current;
+    if (!next) return undefined;
+    if ('x' in next.anchor) return next.anchor;
+    const { blockId } = next.anchor;
+    const block = layoutRef.current.blocks.find((b) => b.id === blockId);
+    return block && { laneId: block.laneId, x: block.end };
+  };
+  /** The place the typed length covers after the green line, with whether it is free; undefined without one. */
+  const nextCursor = () => {
+    const line = nextLine();
+    const intervals = Number(nextRef.current?.digits || 0);
+    const chain = selectedChain();
+    if (!line || !chain || !(intervals > 0) || nextRef.current?.editing) return undefined;
+    const { laneRows, blocks } = layoutRef.current;
+    const laneRow = laneRows.find((row) => row.lane.id === line.laneId);
+    if (!laneRow) return undefined;
+    const span = spanAfter(line.x, chainGrid(chain), intervals);
+    return { laneRow, chain, span, free: isFree(blocks, line.laneId, span) };
+  };
   const sizeRef = useRef({ width: 0, height: 0 });
   const frameRef = useRef(0);
   /** Where the pointer is within the workspace, or null while it is outside. */
@@ -263,6 +309,8 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
   };
   // A restored view is kept as it was; only a fresh workspace is fitted to the first marks.
   const fittedRef = useRef(initialState !== undefined);
+  /** Number of main-ruler marks the next frame zooms to fit (see showFirstMarks), or null. */
+  const pendingFitRef = useRef<number | null>(null);
 
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -360,6 +408,12 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     const { width, height } = sizeRef.current;
     const { rows, gutter, laneRows, blocks, highlightedId } = layoutRef.current;
     const rulerWidth = Math.max(0, width - gutter - RIGHT_GUTTER_PX);
+    // Fitted here rather than in showFirstMarks, so that the gutter is that of the rulers now shown.
+    if (pendingFitRef.current !== null && rulerWidth > 0) {
+      viewRef.current = fitFirstMarks(pendingFitRef.current, rulerWidth);
+      pendingFitRef.current = null;
+      onChangeRef.current?.();
+    }
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
@@ -461,10 +515,13 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     const blockFill = style.getPropertyValue('--block-fill').trim() || ink;
     const blockStroke = style.getPropertyValue('--block-stroke').trim() || ink;
     const highlightFill = style.getPropertyValue('--block-highlight-fill').trim() || highlight;
+    // In next mode the green line takes the place of the highlight, except while a new block gets its pitch.
+    const line = nextLine();
+    const hideHighlight = line !== undefined && !nextRef.current?.editing;
     for (const { lane, top } of laneRows) {
       for (const block of blocks) {
         if (block.laneId !== lane.id) continue;
-        const highlighted = block.id === highlightedId;
+        const highlighted = block.id === highlightedId && !hideHighlight;
         ctx.fillStyle = highlighted ? highlightFill : blockFill;
         ctx.strokeStyle = highlighted ? highlight : blockStroke;
         ctx.lineWidth = highlighted ? SELECTED_LINE_WIDTH : 1;
@@ -473,12 +530,23 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     }
 
     // The paste cursor shades a free place green and a place over blocks red.
-    const place = pasteCursorSpan();
-    if (place) {
+    // So does next mode's cursor, showing the length typed after the green line.
+    for (const place of [pasteCursorSpan(), nextCursor()]) {
+      if (!place) continue;
       ctx.fillStyle = style.getPropertyValue(place.free ? '--paste-free-fill' : '--paste-taken-fill').trim() || 'transparent';
       ctx.strokeStyle = style.getPropertyValue(place.free ? '--border-line' : '--cursor').trim() || ink;
       ctx.lineWidth = SELECTED_LINE_WIDTH;
       drawBlock(ctx, viewRef.current, place.laneRow.top, LANE_HEIGHT_PX, place.span.start, place.span.end, '', ink);
+    }
+    const lineRow = hideHighlight ? laneRows.find((row) => row.lane.id === line.laneId) : undefined;
+    if (lineRow) {
+      const x = Math.round(toScreen(viewRef.current, line!.x)) + (NEXT_LINE_WIDTH % 2) / 2;
+      ctx.strokeStyle = style.getPropertyValue('--border-line').trim() || 'green';
+      ctx.lineWidth = NEXT_LINE_WIDTH;
+      ctx.beginPath();
+      ctx.moveTo(x, lineRow.top - NEXT_LINE_OVERHANG_PX);
+      ctx.lineTo(x, lineRow.top + LANE_HEIGHT_PX + NEXT_LINE_OVERHANG_PX);
+      ctx.stroke();
     }
 
     // The borders run across the rulers and the lanes, each on a mark of the ruler it was last moved on.
@@ -905,6 +973,117 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     if (command.action === 'silence') stopAudition();
   };
 
+  /** Next mode's spaces and rectangles, for z and y; forgotten when next mode is left. */
+  const nextUndoStackRef = useRef<NextStep[]>([]);
+  const nextRedoStackRef = useRef<NextStep[]>([]);
+
+  /** Scrolls next mode's green line into view after undo or redo moved it. */
+  const showNextLine = () => {
+    const anchor = nextRef.current?.anchor;
+    if (!anchor) return;
+    // A block put back by redo isn't in the layout yet, so its end is found among the steps' deletions.
+    const x =
+      'x' in anchor
+        ? anchor.x
+        : (layoutRef.current.blocks.find((b) => b.id === anchor.blockId) ??
+            nextUndoStackRef.current.find((s) => s.deletion?.block.id === anchor.blockId)?.deletion?.block)?.end;
+    if (x !== undefined) scrollIntoView(x);
+  };
+
+  /** Starts next mode's green line at the right end of a block, dropping any length typed. */
+  const startNext = (blockId: number) => {
+    nextRef.current = { anchor: { blockId }, digits: '', editing: false };
+    requestDraw();
+  };
+
+  /**
+   * Next mode: digits type a length in intervals of the selected ruler; r leaves that much empty space after the
+   * green line, p puts a block there with the content of the block before it on the lane and returns its id, for the
+   * toolbar to go to its Pitch field. The line moves on to the end of either; for a block, once its pitch is set
+   * (finishNext). h and l move the line to the selected ruler's previous or next mark, j and k to the lane below or above.
+   */
+  const nextCommand = (command: Command): number | undefined => {
+    const next = nextRef.current;
+    if (!next || next.editing) return undefined;
+    if (command.action === 'line') {
+      const line = nextLine();
+      if (!line) return undefined;
+      if (command.direction === 'up' || command.direction === 'down') {
+        const laneId = neighbourLane(latestRef.current.lanes, line.laneId, command.direction === 'down' ? 1 : -1);
+        if (laneId === null || laneId === line.laneId) return undefined;
+        next.anchor = { laneId, x: line.x };
+      } else {
+        const chain = selectedChain();
+        const x = chain && neighbourMark(chainGrid(chain), line.x, command.direction === 'left' ? -1 : 1);
+        if (x === undefined) return undefined;
+        next.anchor = { laneId: line.laneId, x };
+        scrollIntoView(x);
+      }
+    } else if (command.action === 'digit') {
+      if (next.digits.length < MAX_NEXT_DIGITS) next.digits = next.digits === '0' ? String(command.digit) : next.digits + command.digit;
+    } else if (command.action === 'erase') {
+      next.digits = next.digits.slice(0, -1);
+    } else if (command.action === 'clear') {
+      next.digits = '';
+    } else if (command.action === 'space' || command.action === 'rectangle') {
+      const place = nextCursor();
+      if (!place?.free) return undefined;
+      const laneId = place.laneRow.lane.id;
+      const { blocks, highlightedId } = layoutRef.current;
+      const step: NextStep = { before: next.anchor, after: next.anchor, highlightedBefore: highlightedId };
+      next.digits = '';
+      if (command.action === 'space') {
+        next.anchor = { laneId, x: place.span.end };
+      } else {
+        const source = blockBefore(blocks, laneId, place.span.start);
+        const drums = latestRef.current.lanes.find((lane) => lane.id === laneId)?.sound === 'drums';
+        const content = source ?? { pitch: drums ? DEFAULT_DRUM_PITCH : DEFAULT_PITCH, text: DEFAULT_TEXT, chord: [] };
+        const id = addBlock(laneId, place.span, place.chain, content);
+        next.anchor = { blockId: id };
+        next.editing = true;
+        step.blockId = id;
+        setHighlightedId(id);
+      }
+      step.after = next.anchor;
+      nextUndoStackRef.current.push(step);
+      nextRedoStackRef.current = [];
+      // What was just put stays in view, from its start on.
+      const end = toScreen(viewRef.current, place.span.end);
+      if (end < 0 || end > sizeRef.current.width - layoutRef.current.gutter - RIGHT_GUTTER_PX) {
+        viewRef.current = scrollToMark(viewRef.current, place.span.start);
+      }
+      requestDraw();
+      return step.blockId;
+    } else if (command.action === 'undo') {
+      // A rectangle is taken out again, as it is now (e.g. with the pitch it was given), for redo to put back.
+      const step = nextUndoStackRef.current.pop();
+      if (!step) return undefined;
+      if (step.blockId !== undefined) step.deletion = removeBlock(step.blockId);
+      next.anchor = step.before;
+      next.digits = '';
+      if (step.blockId !== undefined) setHighlightedId(step.highlightedBefore);
+      nextRedoStackRef.current.push(step);
+      showNextLine();
+    } else if (command.action === 'redo') {
+      // A rectangle comes back only if its lane is still there and its place still free.
+      const step = nextRedoStackRef.current.pop();
+      if (!step) return undefined;
+      if (step.deletion) {
+        if (!canRestore(step.deletion)) return undefined;
+        restoreBlock(step.deletion);
+        setHighlightedId(step.deletion.block.id);
+      }
+      next.anchor = step.after;
+      next.digits = '';
+      nextUndoStackRef.current.push(step);
+      showNextLine();
+    } else {
+      return undefined;
+    }
+    requestDraw();
+    return undefined;
+  };
+
   /** Moves an edge of the highlighted block along the marks of the selected sub-ruler. */
   const extensionCommand = (command: Command) => {
     const { blocks, highlightedId } = layoutRef.current;
@@ -1167,7 +1346,11 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
       });
     },
     onResize: (id, span) => setBlocks((current) => current.map((b) => (b.id === id ? { ...b, ...span } : b))),
-    onHighlight: setHighlightedId,
+    onHighlight: (id) => {
+      setHighlightedId(id);
+      // In next mode the green line follows a click on a block, unless a new block is still getting its pitch.
+      if (modeRef.current === 'next' && !nextRef.current?.editing) startNext(id);
+    },
     onPressStart: (id) => startAudition(id, 'press'),
     onPressEnd: endPress,
     onWheelOver: (id) => startAudition(id, 'wheel'),
@@ -1184,6 +1367,10 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
   useImperativeHandle(
     ref,
     () => ({
+      showFirstMarks: (count) => {
+        pendingFitRef.current = count;
+        requestDraw();
+      },
       goToMark: (mark) => {
         viewRef.current = scrollToMark(viewRef.current, mark);
         requestDraw();
@@ -1223,6 +1410,9 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
         pasteUndoStackRef.current = [];
         pasteRedoStackRef.current = [];
         pasteCursorRef.current = null;
+        nextRef.current = null;
+        nextUndoStackRef.current = [];
+        nextRedoStackRef.current = [];
         viewRef.current = state.view;
         requestDraw();
       },
@@ -1253,6 +1443,18 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
           playheadRef.current = null;
           requestDraw();
         }
+        if (mode === 'next') {
+          nextRef.current = null;
+          nextUndoStackRef.current = [];
+          nextRedoStackRef.current = [];
+          requestDraw();
+        }
+      },
+      finishNext: () => {
+        const next = nextRef.current;
+        if (!next?.editing) return;
+        next.editing = false;
+        requestDraw();
       },
       enterMode: (mode) => {
         const { lanes, rulers } = latestRef.current;
@@ -1267,8 +1469,11 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
           bordersRef.current = placeBorders(row, viewRef.current, width);
           requestDraw();
         }
+        const { highlightedId } = layoutRef.current;
+        if (mode === 'next' && highlightedId !== null) startNext(highlightedId);
       },
       runCommand: (mode, command) => {
+        if (mode === 'next') return nextCommand(command);
         if (mode === 'depeche') depecheCommand(command);
         if (mode === 'content') contentCommand(command);
         if (mode === 'extension') extensionCommand(command);
@@ -1276,6 +1481,7 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
         if (mode === 'ruler') rulerCommand(command);
         if (mode === 'border') borderCommand(command);
         if (mode === 'transport') transportCommand(command);
+        return undefined;
       },
       setSelectedLaneKey: (key) => {
         const id = selectedLaneIdRef.current;

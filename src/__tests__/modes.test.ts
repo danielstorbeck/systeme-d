@@ -11,7 +11,7 @@ describe('mode commands', () => {
 
   it('waits through modifier keys and swallows an unknown mode key', () => {
     expect(readModeKey(true, 'Shift')).toEqual({ pending: true, consumed: false });
-    expect(readModeKey(true, 'n')).toEqual({ pending: false, mode: undefined, consumed: true });
+    expect(readModeKey(true, 'x')).toEqual({ pending: false, mode: undefined, consumed: true });
   });
 
   it('leaves other keys alone', () => {
@@ -79,7 +79,9 @@ describe('help mode', () => {
     expect(HELP_ORDER[0]).toBe('help');
     expect([...HELP_ORDER].sort()).toEqual([...MODES].sort());
     for (const mode of MODES) {
-      const keys = modeHelp(mode).map((row) => (row.keys === 'Esc' ? 'escape' : row.keys));
+      const keys = modeHelp(mode).flatMap((row) =>
+        row.keys === 'Esc' ? ['escape'] : row.keys === '0–9' ? [...'0123456789'] : [row.keys.toLowerCase()],
+      );
       for (const key of Object.keys(MODE_COMMANDS[mode])) expect(keys).toContain(key);
     }
   });
@@ -114,5 +116,27 @@ describe('transport mode', () => {
     expect(MODE_COMMANDS.transport.s).toEqual({ action: 'stop' });
     expect(MODE_COMMANDS.transport.r).toEqual({ action: 'reset' });
     expect(MODE_COMMANDS.transport.l).toEqual({ action: 'loop' });
+  });
+});
+
+describe('next mode', () => {
+  it('is set with "m n" and reads digits, Backspace, Esc, r, p, z and y', () => {
+    expect(readModeKey(true, 'n')).toMatchObject({ mode: 'next' });
+    expect(MODE_COMMANDS.next['0']).toEqual({ action: 'digit', digit: 0 });
+    expect(MODE_COMMANDS.next['7']).toEqual({ action: 'digit', digit: 7 });
+    expect(MODE_COMMANDS.next.backspace).toEqual({ action: 'erase' });
+    expect(MODE_COMMANDS.next.escape).toEqual({ action: 'clear' });
+    expect(MODE_COMMANDS.next.r).toEqual({ action: 'space' });
+    expect(MODE_COMMANDS.next.p).toEqual({ action: 'rectangle' });
+    expect(MODE_COMMANDS.next.z).toEqual({ action: 'undo' });
+    expect(MODE_COMMANDS.next.h).toEqual({ action: 'line', direction: 'left' });
+    expect(MODE_COMMANDS.next.j).toEqual({ action: 'line', direction: 'down' });
+    expect(MODE_COMMANDS.next.y).toEqual({ action: 'redo' });
+  });
+
+  it('describes the digits in one row of the help', () => {
+    const rows = modeHelp('next');
+    expect(rows.filter((row) => /^\d$/.test(row.keys))).toEqual([]);
+    expect(rows.some((row) => row.keys === '0–9')).toBe(true);
   });
 });

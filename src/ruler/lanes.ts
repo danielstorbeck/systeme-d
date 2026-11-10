@@ -240,6 +240,38 @@ export function cursorSpan(grid: Grid, x: number, intervals: number): { start: n
   return { start, end: start + intervals * interval };
 }
 
+/**
+ * The place next mode's cursor covers: from x on to the intervals-th mark of the grid after x. From a mark it is
+ * that many intervals long; from between marks the first interval is the part up to the next mark.
+ */
+export function spanAfter(x: number, grid: Grid, intervals: number): { start: number; end: number } {
+  const { origin, interval } = grid;
+  // The mark at or just before x; a hair's breadth left of a mark counts as on it.
+  const before = Math.floor((x - origin) / interval + 1e-6);
+  return { start: x, end: origin + (before + intervals) * interval };
+}
+
+/**
+ * The grid's mark before x (side -1) or after it (side 1), a mark at x itself not counting; undefined left of the
+ * lane's start.
+ */
+export function neighbourMark(grid: Grid, x: number, side: -1 | 1): number | undefined {
+  const { origin, interval } = grid;
+  const at = (x - origin) / interval;
+  const index = side < 0 ? Math.ceil(at - 1e-6) - 1 : Math.floor(at + 1e-6) + 1;
+  const mark = origin + index * interval;
+  return mark < FIRST_MARK - 1e-9 ? undefined : mark;
+}
+
+/** The block of the lane that ends last at or before x, i.e. the one before a line at x; undefined if none. */
+export function blockBefore(blocks: Block[], laneId: number, x: number): Block | undefined {
+  let found: Block | undefined;
+  for (const block of blocks) {
+    if (block.laneId === laneId && block.end <= x + 1e-9 && (!found || block.end > found.end)) found = block;
+  }
+  return found;
+}
+
 /** Whether no block of the lane overlaps the span. */
 export function isFree(blocks: Block[], laneId: number, span: { start: number; end: number }): boolean {
   const tolerance = (span.end - span.start) * 1e-6;

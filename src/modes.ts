@@ -1,7 +1,7 @@
 /**
  * Modes decide how key strokes are read. The "m" key starts a mode command and the next key names the mode:
  * "m h" sets the help mode, "m e" the extension mode, "m l" the lane mode, "m r" the ruler mode, "m b" the
- * border mode, "m t" the transport mode, "m d" the depeche mode, "m c" the content mode.
+ * border mode, "m t" the transport mode, "m d" the depeche mode, "m c" the content mode, "m n" the next mode.
  *
  * The keys of each mode are described here, next to what they do, and the help overlay is made from these
  * descriptions; keep them in step with the code when keys change.
@@ -9,7 +9,7 @@
 
 import { DRUMS, type Drum } from './drums';
 
-export const MODES = ['depeche', 'content', 'help', 'extension', 'lane', 'ruler', 'border', 'transport'] as const;
+export const MODES = ['depeche', 'content', 'help', 'extension', 'lane', 'ruler', 'border', 'transport', 'next'] as const;
 export type Mode = (typeof MODES)[number];
 
 export const DEFAULT_MODE: Mode = 'depeche';
@@ -23,6 +23,7 @@ export const MODE_LABELS: Record<Mode, string> = {
   ruler: 'Ruler',
   border: 'Border',
   transport: 'Transport',
+  next: 'Next',
 };
 
 /** The key that follows "m" to set each mode. */
@@ -35,6 +36,7 @@ export const MODE_KEYS: Record<Mode, string> = {
   ruler: 'r',
   border: 'b',
   transport: 't',
+  next: 'n',
 };
 
 /** What each mode is for, in a few words. */
@@ -47,10 +49,11 @@ export const MODE_SUMMARIES: Record<Mode, string> = {
   ruler: 'derive, remove, select and move sub-rulers',
   border: 'mark an interval with two green borders, moved along the marks of the selected ruler',
   transport: 'play, stop and loop, between the borders if they are visible',
+  next: 'add rectangles and empty spaces one after the other, to the right of the highlighted rectangle',
 };
 
 /** The order of the modes in the help overlay: help first. */
-export const HELP_ORDER: Mode[] = ['help', 'extension', 'lane', 'ruler', 'border', 'transport', 'depeche', 'content'];
+export const HELP_ORDER: Mode[] = ['help', 'extension', 'lane', 'ruler', 'border', 'transport', 'depeche', 'content', 'next'];
 
 /** What a key does in a mode. Offsets are positive downwards. */
 export type Command =
@@ -79,6 +82,12 @@ export type Command =
   | { action: 'listen' }
   | { action: 'silence' }
   | { action: 'drum'; drum: Drum['name'] }
+  | { action: 'digit'; digit: number }
+  | { action: 'erase' }
+  | { action: 'clear' }
+  | { action: 'space' }
+  | { action: 'rectangle' }
+  | { action: 'line'; direction: 'left' | 'right' | 'up' | 'down' }
   | { action: 'highlight'; direction: 'left' | 'right' | 'up' | 'down' }
   | { action: 'resize'; side: 'left' | 'right'; offset: number };
 
@@ -86,6 +95,8 @@ interface Binding {
   key: string;
   command: Command;
   description: string;
+  /** Keys described together in OTHER_KEYS, e.g. the digits, have no row of their own in the help overlay. */
+  unlisted?: boolean;
 }
 
 /** A row of the help overlay: one or more keys and what they do. */
@@ -113,7 +124,7 @@ const drumBindings = (): Binding[] =>
   DRUMS.map((drum) => ({
     key: DRUM_KEYS[drum.name],
     command: { action: 'drum', drum: drum.name },
-    description: `in a drum lane, make the highlighted rectangle the ${drum.label.toLowerCase()} (${drum.name})`,
+    description: `in a drum lane, choose the ${drum.label.toLowerCase()} (${drum.name}) in the Pitch field; Enter makes the highlighted rectangle that drum`,
   }));
 
 const BINDINGS: Record<Mode, Binding[]> = {
@@ -147,7 +158,7 @@ const BINDINGS: Record<Mode, Binding[]> = {
       key: 'p',
       command: { action: 'pitch' },
       description:
-        'go to the Pitch field of the highlighted rectangle; type <octave><letter><accidental>, e.g. 5a# or 3bb, and press Enter. In a drum lane, choose the drum with the arrow keys',
+        'go to the Pitch field of the highlighted rectangle; type <octave><letter><accidental>, e.g. 5a# or 3bb, and press Enter. In a drum lane, choose the drum with the arrow keys or the drum keys and press Enter',
     },
     {
       key: 'v',
@@ -168,6 +179,41 @@ const BINDINGS: Record<Mode, Binding[]> = {
         'play the highlighted rectangle, with its chord, until o; not while the transport is playing. It follows changes of pitch, chord and drum, and stops when the rectangle is deleted or content mode is left',
     },
     { key: 'o', command: { action: 'silence' }, description: 'stop the rectangle played with i' },
+  ],
+  next: [
+    ...Array.from({ length: 10 }, (_, digit): Binding => ({
+      key: String(digit),
+      command: { action: 'digit', digit },
+      description: '',
+      unlisted: true,
+    })),
+    { key: 'h', command: { action: 'line', direction: 'left' }, description: 'move the green line to the previous mark of the selected ruler' },
+    { key: 'l', command: { action: 'line', direction: 'right' }, description: 'move the green line to the next mark of the selected ruler' },
+    { key: 'j', command: { action: 'line', direction: 'down' }, description: 'move the green line to the lane below, at the same place' },
+    { key: 'k', command: { action: 'line', direction: 'up' }, description: 'move the green line to the lane above, at the same place' },
+    { key: 'Backspace', command: { action: 'erase' }, description: 'take back the last digit of the length' },
+    { key: 'Esc', command: { action: 'clear' }, description: 'drop the length typed so far' },
+    {
+      key: 'r',
+      command: { action: 'space' },
+      description: 'leave an empty space of the typed length after the green line; the line moves to its right end',
+    },
+    {
+      key: 'p',
+      command: { action: 'rectangle' },
+      description:
+        'put a rectangle of the typed length after the green line, with the content of the rectangle before it on that lane, and go to its Pitch field: type the pitch, e.g. 5a#, or Enter alone to keep the copied one, or in a drum lane choose the drum with the arrow keys or the drum keys of content mode, and press Enter. The line then moves to its right end',
+    },
+    {
+      key: 'z',
+      command: { action: 'undo' },
+      description: 'undo the last space or rectangle, one step at a time: the rectangle goes and the green line goes back; leaving next mode forgets them',
+    },
+    {
+      key: 'y',
+      command: { action: 'redo' },
+      description: 'redo the last undone space or rectangle, with the pitch it had; a rectangle only comes back if its place is still free',
+    },
   ],
   help: [
     { key: 'j', command: { action: 'scroll', offset: 1 }, description: 'scroll down' },
@@ -230,10 +276,22 @@ const OTHER_KEYS: Partial<Record<Mode, KeyHelp[]>> = {
         'if the borders are hidden, puts the left one on the leftmost mark in view and the right one on the mark nearest the middle; needs a selected sub-ruler. A border stays on the mark of the ruler it was last moved on, also when another ruler is selected',
     },
   ],
+  next: [
+    {
+      keys: 'm n',
+      description:
+        'shows a thin green line at the right end of the highlighted rectangle in place of its highlight; needs a highlighted rectangle. Clicking a rectangle moves the line to its right end',
+    },
+    {
+      keys: '0–9',
+      description:
+        'type the length of what comes next, in intervals of the selected ruler (one is needed). The paste cursor shows it from the green line to that many marks of the selected ruler on, so it always ends on a mark; if the line is between marks, the first interval is the part up to the next mark. It is green where the place is free, red over a rectangle, where r and p do nothing',
+    },
+  ],
   content: [
     { keys: 'h l j k', description: 'if no rectangle is highlighted, highlight the one in view nearest the middle of the view' },
-    { keys: 'Enter', description: 'in the Pitch, Chord or Text field: take what was typed and leave the field' },
-    { keys: 'Esc', description: 'in the Pitch, Chord or Text field: leave the field; a pitch being typed is dropped' },
+    { keys: 'Enter', description: 'in the Pitch, Chord or Text field: take what was typed and leave the field; in the empty Pitch field, keep the pitch shown greyed out' },
+    { keys: 'Esc', description: 'in the Pitch, Chord or Text field: leave the field; a pitch being typed or a drum not yet confirmed is dropped' },
   ],
   depeche: [
     { keys: 'h l j k', description: 'if no rectangle is highlighted, highlight the one in view nearest the middle of the view' },
@@ -258,7 +316,10 @@ export const MODE_COMMANDS: Record<Mode, Record<string, Command>> = Object.fromE
 
 /** All keys a mode reads, for the help overlay. */
 export function modeHelp(mode: Mode): KeyHelp[] {
-  return [...BINDINGS[mode].map((b) => ({ keys: b.key, description: b.description })), ...(OTHER_KEYS[mode] ?? [])];
+  return [
+    ...BINDINGS[mode].filter((b) => !b.unlisted).map((b) => ({ keys: b.key, description: b.description })),
+    ...(OTHER_KEYS[mode] ?? []),
+  ];
 }
 
 export function isMode(value: unknown): value is Mode {

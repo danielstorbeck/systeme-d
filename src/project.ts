@@ -7,8 +7,8 @@ import { DEFAULT_TEXT, isVoiceText } from './xsampa';
 import type { PooledChain } from './ruler/chains';
 import { DEFAULT_VOLUME, isVolume, type Block, type Lane } from './ruler/lanes';
 import { isSegments } from './ruler/segments';
-import { MAIN_RULER_ID, type Ratio, type RulerNode } from './ruler/rulers';
-import { clampView, type View } from './ruler/viewport';
+import { INITIAL_RULERS, MAIN_RULER_ID, type Ratio, type RulerNode } from './ruler/rulers';
+import { clampView, INITIAL_VIEW, type View } from './ruler/viewport';
 
 /** Everything the workspace needs to restore the user's work. */
 export interface WorkspaceState {
@@ -31,9 +31,16 @@ export interface ProjectDocument extends WorkspaceState {
 
 export const PROJECT_VERSION = 1;
 export const DEFAULT_PROJECT_NAME = 'composition';
+/** The name of the project "New" starts. */
+export const NEW_PROJECT_NAME = 'unnamed';
 export const AUTOSAVE_KEY = 'systeme-d.autosave';
 /** Where the autosave was kept while the project was called "conlon"; moved to AUTOSAVE_KEY on loading. */
 export const LEGACY_AUTOSAVE_KEY = 'conlon.autosave';
+
+/** Only the main ruler: no sub-rulers, lanes or blocks. */
+export function emptyState(view: View = INITIAL_VIEW): WorkspaceState {
+  return { rulers: INITIAL_RULERS, lanes: [], lanesCreated: 0, blocks: [], chains: [], view };
+}
 
 export function toDocument(name: string, state: WorkspaceState, bpm: number = DEFAULT_BPM): ProjectDocument {
   return { version: PROJECT_VERSION, name, bpm, ...state };
@@ -121,14 +128,48 @@ const pad = (n: number) => String(n).padStart(2, '0');
 
 /** "<name>.<YYYY-MM-DD_HH-MM-SS>.json", in local time. */
 export function projectFileName(name: string, date: Date): string {
-  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-  const time = `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
-  return `${name}.${day}_${time}.json`;
+  return `${name}.${timestamp(date)}.json`;
 }
 
-/** The project name in a file name written by projectFileName; other names just lose ".json". */
+function timestamp(date: Date): string {
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const time = `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+  return `${day}_${time}`;
+}
+
+/**
+ * Names for the MIDI files of one export, "<name>.<YYYY-MM-DD_HH-MM-SS>.<label>.mid", so that they sort together.
+ * A label that is no file name becomes "Track <i>", i being its position counting from 0 (with "all" first, a
+ * lane's track number in the file with all lanes); repeated labels get " 2", " 3", … added.
+ */
+export function midiFileNames(name: string, labels: string[], date: Date): string[] {
+  const taken = new Set<string>();
+  return labels.map((label, i) => {
+    const base = cleanProjectName(label) ?? `Track ${i}`;
+    let unique = base;
+    for (let n = 2; taken.has(unique.toLowerCase()); n++) unique = `${base} ${n}`;
+    taken.add(unique.toLowerCase());
+    return `${name}.${timestamp(date)}.${unique}.mid`;
+  });
+}
+
+/** "dump.<name>.<YYYY-MM-DD_HH-MM-SS>.json": the security copy written before "New" clears the work. */
+export function dumpFileName(name: string, date: Date): string {
+  return `${DUMP_PREFIX}${projectFileName(name, date)}`;
+}
+
+const DUMP_PREFIX = 'dump.';
+const TIMESTAMP_SUFFIX = /\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
+/**
+ * The project name in a file name written by projectFileName or dumpFileName; other names just lose ".json".
+ * Opening a security copy thus gives the project its name back.
+ */
 export function projectNameFromFileName(fileName: string): string {
-  return fileName.replace(/\.json$/i, '').replace(/\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/, '');
+  const stem = fileName.replace(/\.json$/i, '');
+  if (!TIMESTAMP_SUFFIX.test(stem)) return stem;
+  const name = stem.replace(TIMESTAMP_SUFFIX, '');
+  return name.startsWith(DUMP_PREFIX) && name.length > DUMP_PREFIX.length ? name.slice(DUMP_PREFIX.length) : name;
 }
 
 /** The autosaved project, or undefined if there is none or it can't be read. */

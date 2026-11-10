@@ -3,6 +3,7 @@ import {
   AUTOSAVE_KEY,
   LEGACY_AUTOSAVE_KEY,
   cleanProjectName,
+  dumpFileName,
   loadAutosave,
   nextIds,
   parseProject,
@@ -118,6 +119,13 @@ describe('project file names', () => {
   it('give back the name when opening such a file', () => {
     expect(projectNameFromFileName(projectFileName('my.song', date))).toBe('my.song');
     expect(projectNameFromFileName('other.json')).toBe('other');
+  });
+
+  it('mark security copies with "dump." and give back the project name when opening one', () => {
+    expect(dumpFileName('Song', date)).toBe('dump.Song.2026-10-30_09-05-07.json');
+    expect(projectNameFromFileName(dumpFileName('my.song', date))).toBe('my.song');
+    expect(projectNameFromFileName('dump.json')).toBe('dump');
+    expect(projectNameFromFileName('dump.notes.json')).toBe('dump.notes');
   });
 
   it('only use names that are valid file names', () => {

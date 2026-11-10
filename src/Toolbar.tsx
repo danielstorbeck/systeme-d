@@ -35,8 +35,12 @@ interface ToolbarProps {
   onModeEnter: (mode: Mode) => void;
   /** Called when a mode is left for another one; looking at the help in between doesn't count as leaving. */
   onModeLeave: (mode: Mode) => void;
-  /** A key read as a command in lane or ruler mode. */
-  onCommand: (mode: Mode, command: Command) => void;
+  /** A key read as a command of a mode; true when next mode has put a rectangle whose pitch is to be set. */
+  onCommand: (mode: Mode, command: Command) => number | undefined;
+  /** Id of the highlighted block; undefined while no block is highlighted. */
+  blockId: number | undefined;
+  /** The Pitch field was left after next mode had put a rectangle, whether its pitch was confirmed or not. */
+  onPitchDone: () => void;
   /** Key of the selected lane; undefined while no lane is selected. */
   laneKey: Key | undefined;
   onKeyChange: (key: Key) => void;
@@ -60,6 +64,10 @@ interface ToolbarProps {
   onProjectNameChange: (name: string) => void;
   onSave: () => void;
   onOpen: (file: File) => void;
+  /** Saves a security copy and starts over with only the main ruler; the tool bar then sets depeche mode. */
+  onNew: () => void;
+  /** Downloads the rectangles as MIDI files. */
+  onMidiExport: () => void;
 }
 
 /** Highest pitch first, so that up in the list is up in pitch, like rolling the wheel away from you. */
@@ -89,6 +97,8 @@ export function Toolbar({
   onModeEnter,
   onModeLeave,
   onCommand,
+  onPitchDone,
+  blockId,
   laneKey,
   onKeyChange,
   laneSound,
@@ -105,6 +115,8 @@ export function Toolbar({
   onProjectNameChange,
   onSave,
   onOpen,
+  onNew,
+  onMidiExport,
 }: ToolbarProps) {
   const [text, setText] = useState('');
   const [invalid, setInvalid] = useState(false);
@@ -121,6 +133,25 @@ export function Toolbar({
   const modeBeforeHelpRef = useRef<Mode>(DEFAULT_MODE);
   const onCommandRef = useRef(onCommand);
   onCommandRef.current = onCommand;
+  const onPitchDoneRef = useRef(onPitchDone);
+  onPitchDoneRef.current = onPitchDone;
+  /** Next mode's new rectangle is getting its pitch; leaving the Pitch field moves the green line on. */
+  const nextPitchRef = useRef(false);
+  const leavePitchField = () => {
+    if (!nextPitchRef.current) return;
+    nextPitchRef.current = false;
+    onPitchDoneRef.current();
+  };
+  /** A rectangle next mode has just put, whose Pitch field opens as soon as the fields show it. */
+  const pendingPitchBlockRef = useRef<number | null>(null);
+  // Runs after the render in which the fields (fieldsRef) belong to the new rectangle, which may be on another
+  // lane, e.g. a drum lane, than the rectangle highlighted before.
+  useEffect(() => {
+    if (blockId === undefined || pendingPitchBlockRef.current !== blockId) return;
+    pendingPitchBlockRef.current = null;
+    nextPitchRef.current = true;
+    if (!startPitch()) leavePitchField();
+  }, [blockId]);
   const loopRef = useRef({ loop, onLoopChange });
   loopRef.current = { loop, onLoopChange };
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -137,11 +168,14 @@ export function Toolbar({
   /** The pitch being typed after p in content mode; null while the Pitch list is shown. */
   const [pitchEntry, setPitchEntry] = useState<string | null>(null);
   const [pitchEntryInvalid, setPitchEntryInvalid] = useState(false);
+  /** The drum chosen in content mode, in a drum lane, until Enter makes it the rectangle's; null otherwise. */
+  const [drumEntry, setDrumEntry] = useState<number | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
   const [textFocused, setTextFocused] = useState(false);
   // A typed pitch belongs to the rectangle it was started on.
   useEffect(() => {
     if (pitch === undefined || drums) setPitchEntry(null);
+    if (pitch === undefined || !drums) setDrumEntry(null);
   }, [pitch, drums]);
   const chordEditable = chord !== undefined && pitchSound !== undefined && isWaveform(pitchSound);
   const chordText = chord === undefined ? '' : formatChord(chord);
@@ -175,24 +209,29 @@ export function Toolbar({
   };
 
   /**
-   * Content mode's p: in a drum lane the Pitch list takes the keys, to choose a drum with the arrow keys; elsewhere
-   * a pitch is typed, e.g. 5a#, in a text field shown in its place.
+   * Content mode's p: in a drum lane the Pitch list takes the keys, to choose a drum with the arrow keys or the drum
+   * keys and confirm it with Enter; elsewhere a pitch is typed, e.g. 5a#, in a text field shown in its place.
    */
-  const startPitch = () => {
+  const startPitch = (): boolean => {
     const { pitch, drums } = fieldsRef.current;
-    if (pitch === undefined) return;
-    if (drums) pitchSelectRef.current?.focus();
-    else {
+    if (pitch === undefined) return false;
+    if (drums) {
+      if (document.activeElement !== pitchSelectRef.current) setDrumEntry(drumFor(pitch).pitch);
+      pitchSelectRef.current?.focus();
+    } else {
       setPitchEntry('');
       setPitchEntryInvalid(false);
     }
+    return true;
   };
 
-  /** Content mode's drum keys: the highlighted rectangle becomes that drum, if it is in a drum lane. */
+  /** Content mode's drum keys: in a drum lane, the Pitch list shows that drum; Enter makes it the rectangle's. */
   const chooseDrum = (name: Drum['name']) => {
-    const { pitch, drums, onPitchChange } = fieldsRef.current;
+    const { pitch, drums } = fieldsRef.current;
     const drum = DRUMS.find((d) => d.name === name);
-    if (pitch !== undefined && drums && drum) onPitchChange(drum.pitch);
+    if (pitch === undefined || !drums || !drum) return;
+    setDrumEntry(drum.pitch);
+    pitchSelectRef.current?.focus();
   };
 
   /** Content mode's v: the Chord field takes the keys, if the highlighted rectangle is in a lane with a waveform. */
@@ -254,10 +293,19 @@ export function Toolbar({
         }
         if (result.consumed || result.pending) return;
       }
-      const command = MODE_COMMANDS[modeRef.current]?.[e.key.toLowerCase()];
+      // In next mode the Pitch list of a drum lane also takes content mode's drum keys.
+      const drumCommand = MODE_COMMANDS.content[e.key.toLowerCase()];
+      const command =
+        modeRef.current === 'next' && target === pitchSelectRef.current && drumCommand?.action === 'drum'
+          ? drumCommand
+          : MODE_COMMANDS[modeRef.current]?.[e.key.toLowerCase()];
       if (command && !inLetterField) {
         e.preventDefault();
         e.stopPropagation();
+        // Other commands, e.g. highlighting another rectangle, leave the Pitch list and drop a drum not yet confirmed.
+        if (command.action !== 'drum' && command.action !== 'pitch' && document.activeElement === pitchSelectRef.current) {
+          pitchSelectRef.current?.blur();
+        }
         if (command.action === 'scroll') helpRef.current?.scrollBy({ top: command.offset * HELP_SCROLL_STEP_PX });
         else if (command.action === 'leave') changeMode(modeBeforeHelpRef.current, false);
         else if (command.action === 'loop') loopRef.current.onLoopChange(!loopRef.current.loop);
@@ -266,7 +314,11 @@ export function Toolbar({
         else if (command.action === 'text') startText();
         else if (command.action === 'chord') startChord();
         else if (command.action === 'drum') chooseDrum(command.drum);
-        else onCommandRef.current(modeRef.current, command);
+        else {
+          // Next mode put a rectangle; its Pitch field opens once it is highlighted (see below).
+          const blockId = onCommandRef.current(modeRef.current, command);
+          if (blockId !== undefined) pendingPitchBlockRef.current = blockId;
+        }
         return;
       }
       // While the overview is open, other keys don't change the work behind it.
@@ -404,7 +456,7 @@ export function Toolbar({
               autoComplete="off"
               placeholder={pitch === undefined ? '' : pitchName(pitch, pitchKey).replace(' ', '')}
               aria-invalid={pitchEntryInvalid}
-              title="Type <octave><letter><accidental>, e.g. 5a# or 3bb, and press Enter; Esc keeps the pitch"
+              title="Type <octave><letter><accidental>, e.g. 5a# or 3bb, and press Enter; Enter alone or Esc keeps the pitch shown"
               onChange={(e) => {
                 setPitchEntry(e.target.value);
                 setPitchEntryInvalid(false);
@@ -412,6 +464,11 @@ export function Toolbar({
               onKeyDown={(e) => {
                 if (e.key === 'Escape') e.currentTarget.blur();
                 if (e.key !== 'Enter') return;
+                // Enter in the empty field confirms the pitch shown greyed out, e.g. the copy next mode gives a new rectangle.
+                if (pitchEntry.trim() === '') {
+                  e.currentTarget.blur();
+                  return;
+                }
                 const typed = parsePitch(pitchEntry);
                 if (typed === null) {
                   setPitchEntryInvalid(true);
@@ -420,23 +477,39 @@ export function Toolbar({
                 onPitchChange(typed);
                 e.currentTarget.blur();
               }}
-              onBlur={() => setPitchEntry(null)}
+              onBlur={() => {
+                setPitchEntry(null);
+                leavePitchField();
+              }}
             />
           ) : (
           <select
             ref={pitchSelectRef}
             className={pitchClasses}
-            value={pitch === undefined ? '' : drums ? drumFor(pitch).pitch : pitch}
+            value={pitch === undefined ? '' : drums ? (drumEntry ?? drumFor(pitch).pitch) : pitch}
             disabled={pitch === undefined}
             title={
               pitch === undefined
                 ? 'Click a rectangle, or roll the mouse wheel over it, to set its pitch'
-                : 'Pitch of the highlighted rectangle; rolling the mouse wheel over a rectangle changes it too'
+                : drumEntry !== null
+                  ? 'Press Enter to make the highlighted rectangle this drum; Esc keeps its drum'
+                  : 'Pitch of the highlighted rectangle; rolling the mouse wheel over a rectangle changes it too'
             }
-            onChange={(e) => onPitchChange(Number(e.target.value))}
+            onChange={(e) => {
+              // A drum chosen with the keys after p or a drum key waits for Enter.
+              if (drumEntry !== null) setDrumEntry(Number(e.target.value));
+              else onPitchChange(Number(e.target.value));
+            }}
             onFocus={() => setPitchFocused(true)}
-            onBlur={() => setPitchFocused(false)}
+            onBlur={() => {
+              setPitchFocused(false);
+              setDrumEntry(null);
+              leavePitchField();
+            }}
             onKeyDown={(e) => {
+              if (e.key === 'Enter' && drumEntry !== null && pitch !== undefined && drumEntry !== drumFor(pitch).pitch) {
+                onPitchChange(drumEntry);
+              }
               if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
             }}
           >
@@ -618,6 +691,26 @@ export function Toolbar({
           onClick={() => fileInputRef.current?.click()}
         >
           Open…
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          title="Download a security copy as dump.<name>.<date_time>.json, then start over with only the main ruler"
+          onClick={() => {
+            onNew();
+            setPending(false);
+            changeMode('depeche');
+          }}
+        >
+          New
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          title="Download the rectangles as MIDI files: <name>.<date_time>.all.mid with every lane, then one file per lane"
+          onClick={onMidiExport}
+        >
+          Midi export
         </button>
         <input
           ref={fileInputRef}
