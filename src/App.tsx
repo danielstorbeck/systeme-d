@@ -3,6 +3,7 @@ import type { Chord } from './chord';
 import type { Key } from './keys';
 import { exportMidi } from './midi';
 import { DEFAULT_BPM } from './playback';
+import { exportScore } from './score';
 import type { Sound } from './sound';
 import {
   cleanProjectName,
@@ -16,6 +17,7 @@ import {
   projectFileName,
   projectNameFromFileName,
   saveAutosave,
+  scoreFileName,
   serializeProject,
   toDocument,
   type ProjectDocument,
@@ -132,6 +134,20 @@ export function App() {
     });
   };
 
+  /** Downloads the blocks as a LilyPond score, named like the project file but ending in .ly (see exportScore). */
+  const exportScoreFile = () => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const { lanes, blocks } = workspace.getState();
+    const name = cleanProjectName(projectName) ?? NEW_PROJECT_NAME;
+    const score = exportScore(name, lanes, blocks, bpm);
+    if (score === undefined) {
+      window.alert('There is nothing to export: no lane has any rectangles.');
+      return;
+    }
+    downloadBlob(scoreFileName(name, new Date()), new Blob([score], { type: 'text/x-lilypond;charset=utf-8' }));
+  };
+
   /**
    * Starts over: first downloads a security copy of the current work as dump.<name>.<date_time>.json (always, even
    * right after saving), then keeps only the main ruler, zoomed so that marks 1 to 7 fill the width, with looping and segmentation off, the default speed and
@@ -225,6 +241,7 @@ export function App() {
         onOpen={open}
         onNew={startNew}
         onMidiExport={exportMidiFiles}
+        onScoreExport={exportScoreFile}
       />
     </main>
   );

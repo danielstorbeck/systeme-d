@@ -140,3 +140,19 @@ describe('next mode', () => {
     expect(rows.some((row) => row.keys === '0–9')).toBe(true);
   });
 });
+
+describe('pattern mode', () => {
+  it('is set with "m p" and reads h, j, k, l, a, s, d, c, z and y', () => {
+    expect(readModeKey(true, 'p')).toMatchObject({ mode: 'pattern' });
+    expect(MODE_COMMANDS.pattern.h).toEqual({ action: 'highlight', direction: 'left' });
+    expect(MODE_COMMANDS.pattern.k).toEqual({ action: 'highlight', direction: 'up' });
+    expect(MODE_COMMANDS.pattern.a).toEqual({ action: 'choose', scope: 'all' });
+    expect(MODE_COMMANDS.pattern.s).toEqual({ action: 'choose', scope: 'lane' });
+    expect(MODE_COMMANDS.pattern.d).toEqual({ action: 'choose', scope: 'one' });
+    expect(MODE_COMMANDS.pattern.c).toEqual({ action: 'copy' });
+    expect(MODE_COMMANDS.pattern.p).toEqual({ action: 'cursor' });
+    expect(MODE_COMMANDS.pattern.v).toEqual({ action: 'paste' });
+    expect(MODE_COMMANDS.pattern.z).toEqual({ action: 'undo' });
+    expect(MODE_COMMANDS.pattern.y).toEqual({ action: 'redo' });
+  });
+});

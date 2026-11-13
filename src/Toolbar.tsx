@@ -68,6 +68,8 @@ interface ToolbarProps {
   onNew: () => void;
   /** Downloads the rectangles as MIDI files. */
   onMidiExport: () => void;
+  /** Downloads the rectangles as a LilyPond score. */
+  onScoreExport: () => void;
 }
 
 /** Highest pitch first, so that up in the list is up in pitch, like rolling the wheel away from you. */
@@ -117,6 +119,7 @@ export function Toolbar({
   onOpen,
   onNew,
   onMidiExport,
+  onScoreExport,
 }: ToolbarProps) {
   const [text, setText] = useState('');
   const [invalid, setInvalid] = useState(false);
@@ -711,6 +714,14 @@ export function Toolbar({
           onClick={onMidiExport}
         >
           Midi export
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          title="Download the rectangles as a LilyPond score, <name>.<date_time>.ly: a staff per lane, bars from the segmentation"
+          onClick={onScoreExport}
+        >
+          Score export
         </button>
         <input
           ref={fileInputRef}

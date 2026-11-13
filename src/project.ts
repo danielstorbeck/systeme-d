@@ -153,6 +153,11 @@ export function midiFileNames(name: string, labels: string[], date: Date): strin
   });
 }
 
+/** "<name>.<YYYY-MM-DD_HH-MM-SS>.ly": the score, named like the project file but with LilyPond's extension. */
+export function scoreFileName(name: string, date: Date): string {
+  return projectFileName(name, date).replace(/\.json$/, '.ly');
+}
+
 /** "dump.<name>.<YYYY-MM-DD_HH-MM-SS>.json": the security copy written before "New" clears the work. */
 export function dumpFileName(name: string, date: Date): string {
   return `${DUMP_PREFIX}${projectFileName(name, date)}`;

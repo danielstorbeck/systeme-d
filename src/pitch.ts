@@ -79,11 +79,20 @@ const spellingsByKey = new Map<Key, Spelling[]>();
  * C♯ major is "3 B♯".
  */
 export function pitchName(pitch: number, key: Key = DEFAULT_KEY): string {
+  const { letter, accidental, octave } = spellPitch(pitch, key);
+  return `${octave} ${LETTERS[letter]}${ACCIDENTALS[accidental]}`;
+}
+
+/**
+ * How a pitch is written in the key: its letter (0 for C to 6 for B), its accidental in semitones (−2 … 2) and its
+ * octave in scientific pitch notation, which goes with the letter (see pitchName).
+ */
+export function spellPitch(pitch: number, key: Key = DEFAULT_KEY): { letter: number; accidental: number; octave: number } {
   let spellings = spellingsByKey.get(key);
   if (!spellings) spellingsByKey.set(key, (spellings = keySpellings(key)));
   const { letter, accidental } = spellings[mod12(pitch)];
   const octave = (pitch - accidental - LETTER_PITCH_CLASSES[letter]) / 12 - 1;
-  return `${octave} ${LETTERS[letter]}${ACCIDENTALS[accidental]}`;
+  return { letter, accidental, octave };
 }
 
 /**

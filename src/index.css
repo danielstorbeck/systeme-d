@@ -25,6 +25,10 @@
   --border-line: #1a7f37;
   --paste-free-fill: rgba(26, 127, 55, 0.25);
   --paste-taken-fill: rgba(229, 22, 27, 0.3);
+  /* Pattern mode: chosen rectangles, and the lane the select cursor is on. */
+  --pattern-chosen-fill: rgba(130, 80, 223, 0.4);
+  --pattern-chosen-stroke: #8250df;
+  --pattern-lane-fill: rgba(242, 92, 5, 0.1);
   font-family: system-ui, sans-serif;
 }
 
@@ -47,6 +51,9 @@
     --border-line: #3fb950;
     --paste-free-fill: rgba(63, 185, 80, 0.3);
     --paste-taken-fill: rgba(255, 77, 79, 0.35);
+    --pattern-chosen-fill: rgba(180, 147, 255, 0.45);
+    --pattern-chosen-stroke: #b493ff;
+    --pattern-lane-fill: rgba(255, 154, 60, 0.12);
     --ruler-color-0: #6aa3ff;
     --ruler-color-1: #ff7b8a;
     --ruler-color-2: #5fd08c;

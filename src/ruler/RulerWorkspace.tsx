@@ -57,6 +57,23 @@ import { laneAfterRemoval, removeLane, restoreLane, type LaneRemoval, type LaneW
 import { moveRuler, neighbourRuler, removeRulerTree, restoreRulerTree, rulerAfterRemoval, type RulerRemoval } from './rulerTree';
 import type { Command, Mode } from '../modes';
 import { moveBorder, placeBorders, resolveBorders, type Borders } from './borders';
+import {
+  copyPattern,
+  cursorOn,
+  moveCursor,
+  patternCandidates,
+  patternRange,
+  pasteLanes,
+  pasteSpaceFree,
+  pastedRectangles,
+  shiftPasteCursor,
+  startPasteCursor,
+  type PasteCursor,
+  startCursor,
+  toggleGroup,
+  type Pattern,
+  type PatternCursor,
+} from './pattern';
 import { VolumeLabel } from './VolumeLabel';
 import { addSubRuler, isBinaryRuler, MAIN_RULER_ID, orderRulers, removeRuler, selectRuler, setRatio, shiftRuler } from './rulers';
 import { useBlockDrawing } from './useBlockDrawing';
@@ -164,6 +181,17 @@ interface NextStep {
   deletion?: BlockDeletion;
 }
 
+/**
+ * A pattern pasted in pattern mode: where the paste cursor was before and after, the ids of the blocks put, and once
+ * undone the blocks as they were taken out, with the chains that left the pool with them.
+ */
+interface PatternPaste {
+  before: PasteCursor;
+  after: PasteCursor;
+  blockIds: number[];
+  removed?: { blocks: Block[]; chains: PooledChain[] };
+}
+
 /** After the wheel stops turning over a block, its note goes on sounding this long. */
 const WHEEL_SOUND_HOLD_MS = 400;
 /** Next mode's green line is drawn this thick, reaching this far above and below its lane. */
@@ -171,6 +199,10 @@ const NEXT_LINE_WIDTH = 2;
 const NEXT_LINE_OVERHANG_PX = 3;
 /** Next mode reads lengths of at most this many digits. */
 const MAX_NEXT_DIGITS = 4;
+/** In pattern mode, rectangles that can't be chosen (not wholly between the borders) are drawn this faint. */
+const PATTERN_FADED_ALPHA = 0.35;
+/** After c, the copied rectangles are filled solid this long, to show that the pattern was taken. */
+const PATTERN_COPY_FLASH_MS = 250;
 /** The playback cursor is drawn this thick. */
 const CURSOR_LINE_WIDTH = 2;
 /** Longer gaps between frames (e.g. while the tab was hidden) only advance the cursor this far. */
@@ -286,6 +318,54 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     if (!laneRow) return undefined;
     const span = spanAfter(line.x, chainGrid(chain), intervals);
     return { laneRow, chain, span, free: isFree(blocks, line.laneId, span) };
+  };
+  /**
+   * Pattern mode's select cursor and the chosen rectangles' ids; the choice is kept when pattern mode is left, and
+   * pruned to the rectangles between the borders when it is entered again.
+   */
+  const patternRef = useRef<{ cursor: PatternCursor | null; selection: Set<number> }>({ cursor: null, selection: new Set() });
+  /** The pattern copied with c; it stays until another one is copied. */
+  const copiedPatternRef = useRef<Pattern | null>(null);
+  /** The choices before each change of the current visit to pattern mode, for z and y. */
+  const patternUndoStackRef = useRef<Set<number>[]>([]);
+  const patternRedoStackRef = useRef<Set<number>[]>([]);
+  /** Until this time (performance.now()), the rectangles just copied flash. */
+  const patternFlashUntilRef = useRef(0);
+  /**
+   * What pattern mode chooses from now: the lanes top to bottom, the borders' interval (or that of all rectangles
+   * without borders), the rectangles wholly in it, and the cursor, kept on a lane that is there and off a rectangle
+   * that can't be chosen.
+   */
+  const patternChoice = () => {
+    const { laneRows, blocks } = layoutRef.current;
+    const laneIds = laneRows.map((row) => row.lane.id);
+    const borders = currentBorders();
+    const range = patternRange(borders && { left: borders.left.x, right: borders.right.x }, blocks);
+    const candidates = patternCandidates(blocks, laneIds, range);
+    const state = patternRef.current;
+    let cursor = state.cursor;
+    if (cursor && !laneIds.includes(cursor.laneId)) cursor = null;
+    const blockId = cursor?.blockId;
+    if (cursor && blockId != null && !candidates.some((b) => b.id === blockId)) cursor = { ...cursor, blockId: null };
+    state.cursor = cursor;
+    return { laneIds, range, candidates, cursor };
+  };
+  /** Pattern mode's paste cursor, shown with p; null while hidden. */
+  const patternPasteRef = useRef<PasteCursor | null>(null);
+  /** The pastes of the current visit to pattern mode, for z and y while the paste cursor is shown. */
+  const patternPasteUndoStackRef = useRef<PatternPaste[]>([]);
+  const patternPasteRedoStackRef = useRef<PatternPaste[]>([]);
+  /** The lanes under the paste cursor and whether the space there is empty; undefined while it is hidden. */
+  const patternPastePlace = () => {
+    const cursor = patternPasteRef.current;
+    const pattern = copiedPatternRef.current;
+    if (!cursor || !pattern) return undefined;
+    const { laneRows, blocks } = layoutRef.current;
+    const laneIds = laneRows.map((row) => row.lane.id);
+    const lanes = pasteLanes(pattern, laneIds, cursor);
+    if (!lanes) return undefined;
+    const rows = laneRows.filter((row) => lanes.includes(row.lane.id));
+    return { cursor, pattern, laneIds, rows, free: pasteSpaceFree(blocks, pattern, laneIds, cursor) };
   };
   const sizeRef = useRef({ width: 0, height: 0 });
   const frameRef = useRef(0);
@@ -518,14 +598,37 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     // In next mode the green line takes the place of the highlight, except while a new block gets its pitch.
     const line = nextLine();
     const hideHighlight = line !== undefined && !nextRef.current?.editing;
+    // In pattern mode the select cursor takes the place of the highlight: its lane is shaded and its block outlined.
+    // Chosen blocks have their own colours; blocks that can't be chosen are faded.
+    const pattern = modeRef.current === 'pattern' ? patternChoice() : undefined;
+    const candidateIds = new Set(pattern?.candidates.map((b) => b.id));
+    const cursorRow = pattern?.cursor && laneRows.find((row) => row.lane.id === pattern.cursor!.laneId);
+    if (cursorRow) {
+      ctx.fillStyle = style.getPropertyValue('--pattern-lane-fill').trim() || 'transparent';
+      ctx.fillRect(laneLeft - 0.5, cursorRow.top, Math.max(0, rulerWidth - laneLeft), LANE_HEIGHT_PX);
+    }
+    const chosenFill = style.getPropertyValue('--pattern-chosen-fill').trim() || highlightFill;
+    const chosenStroke = style.getPropertyValue('--pattern-chosen-stroke').trim() || highlight;
+    const flashing = performance.now() < patternFlashUntilRef.current;
     for (const { lane, top } of laneRows) {
       for (const block of blocks) {
         if (block.laneId !== lane.id) continue;
-        const highlighted = block.id === highlightedId && !hideHighlight;
-        ctx.fillStyle = highlighted ? highlightFill : blockFill;
-        ctx.strokeStyle = highlighted ? highlight : blockStroke;
-        ctx.lineWidth = highlighted ? SELECTED_LINE_WIDTH : 1;
+        if (pattern) {
+          const candidate = candidateIds.has(block.id);
+          const chosen = candidate && patternRef.current.selection.has(block.id);
+          const underCursor = block.id === pattern.cursor?.blockId;
+          ctx.fillStyle = chosen ? (flashing ? chosenStroke : chosenFill) : underCursor ? highlightFill : blockFill;
+          ctx.strokeStyle = underCursor ? highlight : chosen ? chosenStroke : blockStroke;
+          ctx.lineWidth = underCursor || chosen ? SELECTED_LINE_WIDTH : 1;
+          ctx.globalAlpha = candidate ? 1 : PATTERN_FADED_ALPHA;
+        } else {
+          const highlighted = block.id === highlightedId && !hideHighlight;
+          ctx.fillStyle = highlighted ? highlightFill : blockFill;
+          ctx.strokeStyle = highlighted ? highlight : blockStroke;
+          ctx.lineWidth = highlighted ? SELECTED_LINE_WIDTH : 1;
+        }
         drawBlock(ctx, viewRef.current, top, LANE_HEIGHT_PX, block.start, block.end, noteName(block.pitch, lane.sound, lane.key, block.text, block.chord), ink);
+        ctx.globalAlpha = 1;
       }
     }
 
@@ -538,7 +641,25 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
       ctx.lineWidth = SELECTED_LINE_WIDTH;
       drawBlock(ctx, viewRef.current, place.laneRow.top, LANE_HEIGHT_PX, place.span.start, place.span.end, '', ink);
     }
-    const lineRow = hideHighlight ? laneRows.find((row) => row.lane.id === line.laneId) : undefined;
+    // Pattern mode's paste cursor covers the pattern's lanes over its width, green if empty, red if not; the
+    // rectangles it would put are outlined in it.
+    const pastePlace = patternPastePlace();
+    if (pastePlace) {
+      const { cursor, pattern, laneIds, rows, free } = pastePlace;
+      ctx.fillStyle = style.getPropertyValue(free ? '--paste-free-fill' : '--paste-taken-fill').trim() || 'transparent';
+      ctx.strokeStyle = style.getPropertyValue(free ? '--border-line' : '--cursor').trim() || ink;
+      ctx.lineWidth = SELECTED_LINE_WIDTH;
+      for (const row of rows) drawBlock(ctx, viewRef.current, row.top, LANE_HEIGHT_PX, cursor.x, cursor.x + pattern.width, '', ink);
+      ctx.fillStyle = 'transparent';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      for (const r of pastedRectangles(pattern, laneIds, cursor)) {
+        const row = rows.find((candidate) => candidate.lane.id === r.laneId);
+        if (row) drawBlock(ctx, viewRef.current, row.top, LANE_HEIGHT_PX, r.start, r.end, '', ink);
+      }
+      ctx.setLineDash([]);
+    }
+    const lineRow = hideHighlight ?laneRows.find((row) => row.lane.id === line.laneId) : undefined;
     if (lineRow) {
       const x = Math.round(toScreen(viewRef.current, line!.x)) + (NEXT_LINE_WIDTH % 2) / 2;
       ctx.strokeStyle = style.getPropertyValue('--border-line').trim() || 'green';
@@ -1084,6 +1205,161 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     return undefined;
   };
 
+  /** Puts pattern mode's select cursor there, highlighting its block and scrolling it into view. */
+  const placePatternCursor = (cursor: PatternCursor) => {
+    patternRef.current.cursor = cursor;
+    const block = layoutRef.current.blocks.find((b) => b.id === cursor.blockId);
+    if (block) {
+      setHighlightedId(block.id);
+      scrollIntoView(block.start);
+    }
+    requestDraw();
+  };
+
+  /** Scrolls so that a place from start to end is in view, from its start on, unless it is in view already. */
+  const showPlace = (start: number, end: number) => {
+    const width = sizeRef.current.width - layoutRef.current.gutter - RIGHT_GUTTER_PX;
+    const left = toScreen(viewRef.current, start);
+    const right = toScreen(viewRef.current, end);
+    if (left >= 0 && right <= width) return;
+    viewRef.current = scrollToMark(viewRef.current, start);
+    requestDraw();
+  };
+
+  /**
+   * Pattern mode's pasting: p shows the paste cursor right of the right border, or hides it; while it is shown,
+   * h and l move it to the previous or next mark of the selected ruler (the main ruler if none is selected), j and k
+   * a lane down or up, v pastes the pattern if the space under it is empty and moves it on by the pattern's width,
+   * and z and y undo and redo pastes. Returns whether the command was one of these.
+   */
+  const patternPasteCommand = (command: Command, laneIds: number[], rightBorder: number): boolean => {
+    const pattern = copiedPatternRef.current;
+    const cursor = patternPasteRef.current;
+    if (command.action === 'cursor') {
+      if (cursor) patternPasteRef.current = null;
+      else if (pattern) {
+        const start = startPasteCursor(pattern, laneIds.length, rightBorder);
+        patternPasteRef.current = start ?? null;
+        if (start) showPlace(start.x, start.x + pattern.width);
+      }
+      requestDraw();
+      return true;
+    }
+    if (!cursor || !pattern) return command.action === 'paste';
+    const undoStack = patternPasteUndoStackRef.current;
+    const redoStack = patternPasteRedoStackRef.current;
+    const moveTo = (next: PasteCursor) => {
+      patternPasteRef.current = next;
+      showPlace(next.x, next.x + pattern.width);
+      requestDraw();
+    };
+    switch (command.action) {
+      case 'highlight': {
+        if (command.direction === 'up' || command.direction === 'down') {
+          moveTo(shiftPasteCursor(cursor, pattern, laneIds.length, command.direction === 'down' ? 1 : -1));
+          return true;
+        }
+        const chain = selectedChain();
+        const grid = chain ? chainGrid(chain) : layoutRef.current.rows.find((row) => row.node.parentId === null);
+        const x = grid && neighbourMark(grid, cursor.x, command.direction === 'left' ? -1 : 1);
+        if (x !== undefined) moveTo({ ...cursor, x });
+        return true;
+      }
+      case 'paste': {
+        if (!patternPastePlace()?.free) return true;
+        // Each block gets its own copy of the pattern's chord and chain, so that the pattern stays as it is.
+        const blockIds = pastedRectangles(pattern, laneIds, cursor).map((r) =>
+          addBlock(r.laneId, { start: r.start, end: r.end }, structuredClone(r.chain), {
+            pitch: r.pitch,
+            text: r.text,
+            chord: [...r.chord],
+          }),
+        );
+        const after = { ...cursor, x: cursor.x + pattern.width };
+        undoStack.push({ before: cursor, after, blockIds });
+        patternPasteRedoStackRef.current = [];
+        moveTo(after);
+        return true;
+      }
+      case 'undo': {
+        // Pastes whose blocks have all been deleted since are skipped.
+        let paste;
+        let removed;
+        while ((paste = undoStack.pop()) && !(removed = removeBlocks(paste.blockIds)));
+        if (!paste || !removed) return true;
+        paste.removed = removed;
+        redoStack.push(paste);
+        moveTo(paste.before);
+        return true;
+      }
+      case 'redo': {
+        // A paste only comes back if its lanes are still there and its place still empty.
+        const paste = redoStack[redoStack.length - 1];
+        if (!paste?.removed || !paste.removed.blocks.every((block) => canRestore({ block }))) return true;
+        redoStack.pop();
+        restoreBlocks(paste.removed);
+        paste.removed = undefined;
+        undoStack.push(paste);
+        moveTo(paste.after);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /**
+   * Pattern mode: h, j, k and l move the select cursor; a, s and d choose or unchoose all rectangles between the
+   * borders, those on the cursor's lane, or the one under the cursor; c copies the chosen ones as a pattern; z and y
+   * undo and redo changes of the choice.
+   */
+  const patternCommand = (command: Command) => {
+    const { laneIds, range, candidates, cursor } = patternChoice();
+    const state = patternRef.current;
+    if (patternPasteCommand(command, laneIds, range?.end ?? FIRST_MARK)) return;
+    if (command.action === 'highlight') {
+      const view = viewRef.current;
+      const moved = cursor
+        ? moveCursor(candidates, laneIds, cursor, command.direction)
+        : startCursor(candidates, laneIds, layoutRef.current.highlightedId, toWorld(view, 0));
+      if (moved) placePatternCursor(moved);
+    } else if (command.action === 'choose') {
+      const ids =
+        command.scope === 'all'
+          ? candidates.map((b) => b.id)
+          : command.scope === 'lane'
+            ? candidates.filter((b) => b.laneId === cursor?.laneId).map((b) => b.id)
+            : cursor?.blockId != null
+              ? [cursor.blockId]
+              : [];
+      // Rectangles chosen before that can't be chosen now, e.g. outside moved borders, are let go.
+      const current = new Set(candidates.filter((b) => state.selection.has(b.id)).map((b) => b.id));
+      const next = toggleGroup(current, ids);
+      if (next.size === state.selection.size && [...next].every((id) => state.selection.has(id))) return;
+      patternUndoStackRef.current.push(state.selection);
+      patternRedoStackRef.current = [];
+      state.selection = next;
+    } else if (command.action === 'undo' || command.action === 'redo') {
+      const [from, to] =
+        command.action === 'undo' ? [patternUndoStackRef, patternRedoStackRef] : [patternRedoStackRef, patternUndoStackRef];
+      const selection = from.current.pop();
+      if (!selection) return;
+      to.current.push(state.selection);
+      state.selection = selection;
+    } else if (command.action === 'copy') {
+      const pattern = range && copyPattern(candidates, state.selection, laneIds, chainsRef.current, range);
+      if (!pattern) return;
+      copiedPatternRef.current = pattern;
+      // A paste cursor already shown takes the size of the new pattern, on lanes that are there.
+      const paste = patternPasteRef.current;
+      if (paste) patternPasteRef.current = laneIds.length >= pattern.lanes ? shiftPasteCursor(paste, pattern, laneIds.length, 0) : null;
+      patternFlashUntilRef.current = performance.now() + PATTERN_COPY_FLASH_MS;
+      window.setTimeout(requestDraw, PATTERN_COPY_FLASH_MS + 20);
+    } else {
+      return;
+    }
+    requestDraw();
+  };
+
   /** Moves an edge of the highlighted block along the marks of the selected sub-ruler. */
   const extensionCommand = (command: Command) => {
     const { blocks, highlightedId } = layoutRef.current;
@@ -1162,6 +1438,30 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
     },
     [updateChains],
   );
+
+  /**
+   * Takes several blocks out at once, returning those there were for putting back, with the chains that left the
+   * pool with them; undefined if none of them was there.
+   */
+  const removeBlocks = (ids: number[]) => {
+    const { blocks } = latestRef.current;
+    const taken = blocks.filter((b) => ids.includes(b.id));
+    if (taken.length === 0) return undefined;
+    const remaining = blocks.filter((b) => !ids.includes(b.id));
+    const pool = pruneChains(chainsRef.current, remaining);
+    const chains = chainsRef.current.filter((entry) => !pool.includes(entry));
+    setBlocks(remaining);
+    updateChains(pool);
+    setHighlightedId((highlighted) => (highlighted !== null && ids.includes(highlighted) ? null : highlighted));
+    return { blocks: taken, chains };
+  };
+
+  /** Puts blocks taken out with removeBlocks back, with their chains. */
+  const restoreBlocks = ({ blocks, chains }: { blocks: Block[]; chains: PooledChain[] }) => {
+    setBlocks((current) => [...current, ...blocks]);
+    const missing = chains.filter((chain) => !chainsRef.current.some((entry) => entry.id === chain.id));
+    if (missing.length > 0) updateChains([...chainsRef.current, ...missing]);
+  };
 
   /** Deletes a block, recording it for undo. */
   const deleteBlock = useCallback(
@@ -1350,6 +1650,11 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
       setHighlightedId(id);
       // In next mode the green line follows a click on a block, unless a new block is still getting its pitch.
       if (modeRef.current === 'next' && !nextRef.current?.editing) startNext(id);
+      // In pattern mode the select cursor follows a click on a block that can be chosen.
+      if (modeRef.current === 'pattern') {
+        const block = patternChoice().candidates.find((b) => b.id === id);
+        if (block) placePatternCursor(cursorOn(block));
+      }
     },
     onPressStart: (id) => startAudition(id, 'press'),
     onPressEnd: endPress,
@@ -1413,6 +1718,13 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
         nextRef.current = null;
         nextUndoStackRef.current = [];
         nextRedoStackRef.current = [];
+        // A copied pattern doesn't depend on the work, so it stays for the next one.
+        patternRef.current = { cursor: null, selection: new Set() };
+        patternUndoStackRef.current = [];
+        patternRedoStackRef.current = [];
+        patternPasteRef.current = null;
+        patternPasteUndoStackRef.current = [];
+        patternPasteRedoStackRef.current = [];
         viewRef.current = state.view;
         requestDraw();
       },
@@ -1449,6 +1761,15 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
           nextRedoStackRef.current = [];
           requestDraw();
         }
+        // The chosen blocks and the copied pattern stay; the paste cursor and the undo history go.
+        if (mode === 'pattern') {
+          patternUndoStackRef.current = [];
+          patternRedoStackRef.current = [];
+          patternPasteRef.current = null;
+          patternPasteUndoStackRef.current = [];
+          patternPasteRedoStackRef.current = [];
+          requestDraw();
+        }
       },
       finishNext: () => {
         const next = nextRef.current;
@@ -1471,9 +1792,21 @@ export const RulerWorkspace = forwardRef<RulerWorkspaceHandle, RulerWorkspacePro
         }
         const { highlightedId } = layoutRef.current;
         if (mode === 'next' && highlightedId !== null) startNext(highlightedId);
+        if (mode === 'pattern') {
+          // The cursor starts on the highlighted block, or where it was last time; blocks no longer between the
+          // borders are let go.
+          const { laneIds, candidates, cursor } = patternChoice();
+          const state = patternRef.current;
+          state.selection = new Set(candidates.filter((b) => state.selection.has(b.id)).map((b) => b.id));
+          const preferred = candidates.some((b) => b.id === highlightedId) ? highlightedId : (cursor?.blockId ?? null);
+          const start = startCursor(candidates, laneIds, preferred, cursor?.x ?? toWorld(viewRef.current, 0));
+          if (start) placePatternCursor(start);
+          else requestDraw();
+        }
       },
       runCommand: (mode, command) => {
         if (mode === 'next') return nextCommand(command);
+        if (mode === 'pattern') patternCommand(command);
         if (mode === 'depeche') depecheCommand(command);
         if (mode === 'content') contentCommand(command);
         if (mode === 'extension') extensionCommand(command);

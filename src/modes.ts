@@ -1,7 +1,7 @@
 /**
  * Modes decide how key strokes are read. The "m" key starts a mode command and the next key names the mode:
  * "m h" sets the help mode, "m e" the extension mode, "m l" the lane mode, "m r" the ruler mode, "m b" the
- * border mode, "m t" the transport mode, "m d" the depeche mode, "m c" the content mode, "m n" the next mode.
+ * border mode, "m t" the transport mode, "m d" the depeche mode, "m c" the content mode, "m n" the next mode, "m p" the pattern mode.
  *
  * The keys of each mode are described here, next to what they do, and the help overlay is made from these
  * descriptions; keep them in step with the code when keys change.
@@ -9,7 +9,7 @@
 
 import { DRUMS, type Drum } from './drums';
 
-export const MODES = ['depeche', 'content', 'help', 'extension', 'lane', 'ruler', 'border', 'transport', 'next'] as const;
+export const MODES = ['depeche', 'content', 'help', 'extension', 'lane', 'ruler', 'border', 'transport', 'next', 'pattern'] as const;
 export type Mode = (typeof MODES)[number];
 
 export const DEFAULT_MODE: Mode = 'depeche';
@@ -24,6 +24,7 @@ export const MODE_LABELS: Record<Mode, string> = {
   border: 'Border',
   transport: 'Transport',
   next: 'Next',
+  pattern: 'Pattern',
 };
 
 /** The key that follows "m" to set each mode. */
@@ -37,6 +38,7 @@ export const MODE_KEYS: Record<Mode, string> = {
   border: 'b',
   transport: 't',
   next: 'n',
+  pattern: 'p',
 };
 
 /** What each mode is for, in a few words. */
@@ -50,10 +52,11 @@ export const MODE_SUMMARIES: Record<Mode, string> = {
   border: 'mark an interval with two green borders, moved along the marks of the selected ruler',
   transport: 'play, stop and loop, between the borders if they are visible',
   next: 'add rectangles and empty spaces one after the other, to the right of the highlighted rectangle',
+  pattern: 'choose rectangles of some lanes between the borders, copy them as a pattern and paste it into empty space, once or several times in a row',
 };
 
 /** The order of the modes in the help overlay: help first. */
-export const HELP_ORDER: Mode[] = ['help', 'extension', 'lane', 'ruler', 'border', 'transport', 'depeche', 'content', 'next'];
+export const HELP_ORDER: Mode[] = ['help', 'extension', 'lane', 'ruler', 'border', 'transport', 'depeche', 'content', 'next', 'pattern'];
 
 /** What a key does in a mode. Offsets are positive downwards. */
 export type Command =
@@ -87,6 +90,7 @@ export type Command =
   | { action: 'clear' }
   | { action: 'space' }
   | { action: 'rectangle' }
+  | { action: 'choose'; scope: 'all' | 'lane' | 'one' }
   | { action: 'line'; direction: 'left' | 'right' | 'up' | 'down' }
   | { action: 'highlight'; direction: 'left' | 'right' | 'up' | 'down' }
   | { action: 'resize'; side: 'left' | 'right'; offset: number };
@@ -215,6 +219,54 @@ const BINDINGS: Record<Mode, Binding[]> = {
       description: 'redo the last undone space or rectangle, with the pitch it had; a rectangle only comes back if its place is still free',
     },
   ],
+  pattern: [
+    { key: 'h', command: { action: 'highlight', direction: 'left' }, description: 'move the select cursor to the rectangle to the left on its lane, between the borders; while the paste cursor is shown, move it to the previous mark of the selected ruler (the main ruler if none is selected)' },
+    { key: 'l', command: { action: 'highlight', direction: 'right' }, description: 'move the select cursor to the rectangle to the right on its lane, between the borders; while the paste cursor is shown, move it to the next mark of the selected ruler (the main ruler if none is selected)' },
+    {
+      key: 'j',
+      command: { action: 'highlight', direction: 'down' },
+      description: 'move the select cursor to the lane below, onto its rectangle nearest the cursor between the borders, if it has one; while the paste cursor is shown, move it a lane down, if the pattern still fits on the lanes',
+    },
+    {
+      key: 'k',
+      command: { action: 'highlight', direction: 'up' },
+      description: 'move the select cursor to the lane above, onto its rectangle nearest the cursor between the borders, if it has one; while the paste cursor is shown, move it a lane up',
+    },
+    {
+      key: 'a',
+      command: { action: 'choose', scope: 'all' },
+      description: 'choose all rectangles between the borders; if all of them are chosen already, unchoose them all',
+    },
+    {
+      key: 's',
+      command: { action: 'choose', scope: 'lane' },
+      description: "choose all rectangles between the borders on the cursor's lane; if all of them are chosen already, unchoose them",
+    },
+    { key: 'd', command: { action: 'choose', scope: 'one' }, description: 'choose the rectangle under the select cursor, or unchoose it if it is chosen' },
+    {
+      key: 'c',
+      command: { action: 'copy' },
+      description:
+        'copy the chosen rectangles as a pattern, as wide as between the borders. It stays as it was copied, whatever happens to the lanes and rectangles afterwards, until another pattern is copied, also after leaving pattern mode',
+    },
+    {
+      key: 'p',
+      command: { action: 'cursor' },
+      description:
+        'show or hide the paste cursor; needs a copied pattern. It is as wide as the pattern and covers as many lanes as it, starting right of the right border (or of the rightmost rectangle without borders), on the lanes the pattern was copied from. It is green where the space is empty and red where a rectangle is in the way',
+    },
+    {
+      key: 'v',
+      command: { action: 'paste' },
+      description: 'paste the pattern where the paste cursor is, if the space is empty (green); the cursor then moves on by its width, so that repeated v pastes the pattern again and again in a row',
+    },
+    {
+      key: 'z',
+      command: { action: 'undo' },
+      description: 'undo the last change to the chosen rectangles, one step at a time; while the paste cursor is shown, undo the last paste instead and move the cursor back. Leaving pattern mode forgets them',
+    },
+    { key: 'y', command: { action: 'redo' }, description: 'redo the last undone change to the chosen rectangles; while the paste cursor is shown, redo the last undone paste, if its space is still empty' },
+  ],
   help: [
     { key: 'j', command: { action: 'scroll', offset: 1 }, description: 'scroll down' },
     { key: 'k', command: { action: 'scroll', offset: -1 }, description: 'scroll up' },
@@ -286,6 +338,13 @@ const OTHER_KEYS: Partial<Record<Mode, KeyHelp[]>> = {
       keys: '0–9',
       description:
         'type the length of what comes next, in intervals of the selected ruler (one is needed). The paste cursor shows it from the green line to that many marks of the selected ruler on, so it always ends on a mark; if the line is between marks, the first interval is the part up to the next mark. It is green where the place is free, red over a rectangle, where r and p do nothing',
+    },
+  ],
+  pattern: [
+    {
+      keys: 'm p',
+      description:
+        'shows the select cursor: the lane it is on is shaded and the rectangle it is on outlined like the highlight; it starts on the highlighted rectangle. Only rectangles wholly between the borders of border mode can be chosen, the others are faded; without borders, all rectangles can. Chosen rectangles are purple. They stay chosen when pattern mode is left and entered again, as long as they are still between the borders. Clicking a rectangle moves the cursor there. Leaving pattern mode hides the paste cursor',
     },
   ],
   content: [
